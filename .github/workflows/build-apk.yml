@@ -1,0 +1,59 @@
+name: Build Cobalt YT APK
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Отримати код репозиторію
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Java 17 для Android/Gradle
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      # 3. Дозволити запуск Gradle Wrapper
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      # 4. Зібрати Debug APK
+      - name: Build APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      # 5. Зберегти APK в Actions
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: CobaltYT-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      # 6. Створити Release після push у main
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "build-${{ github.run_number }}"
+          name: "Cobalt YT build ${{ github.run_number }}"
+          generate_release_notes: true
+          files: app/build/outputs/apk/debug/*.apk
