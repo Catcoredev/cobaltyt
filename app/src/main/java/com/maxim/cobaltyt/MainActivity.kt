@@ -21,6 +21,10 @@ import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.platform.LocalContext
+import android.content.Context
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -47,7 +51,10 @@ fun CobaltYTApp(store: LocalStore) {
     val scope = rememberCoroutineScope()
     val cobalt = remember(store) { CobaltApi(store) }
     val yt = remember(store) { YouTubeSearch(store) }
-    val downloader = remember(store) { DownloadHelper((androidx.compose.ui.platform.LocalContext.current)) }
+    // LocalContext.current must be read from the @Composable scope,
+    // not from inside remember's non-composable calculation lambda.
+    val context = LocalContext.current
+    val downloader = remember(store, context) { DownloadHelper(context) }
 
     MaterialTheme(colorScheme = lightColorScheme()) {
         Scaffold(
@@ -226,25 +233,105 @@ fun SettingsScreen(
 
 @Composable
 fun PlayerDialog(item: HistoryItem, onDismiss: () -> Unit) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val player = remember(item.mediaUrl) {
+    val context = LocalContext.current
+
+    // Save playback position separately for every video.
+    val progressPrefs = remember(context) {
+        context.getSharedPreferences("cobalt_yt_progress", Context.MODE_PRIVATE)
+    }
+
+    val savedPosition = remember(item.id) {
+        progressPrefs.getLong("position_${item.id}", 0L)
+    }
+
+    val player = remember(item.id, item.mediaUrl) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.fromUri(item.mediaUrl))
             prepare()
+
+            if (savedPosition > 0L) {
+                seekTo(savedPosition)
+            }
+
             playWhenReady = true
         }
     }
-    DisposableEffect(player) { onDispose { player.release() } }
+
+    // Persist the current position approximately once per second.
+    LaunchedEffect(player, item.id) {
+        while (isActive) {
+            delay(1000L)
+
+            if (player.duration > 0L && player.currentPosition >= 0L) {
+                progressPrefs.edit()
+                    .putLong("position_${item.id}", player.currentPosition)
+                    .apply()
+            }
+        }
+    }
+
+    // Save one final position when the dialog/player is closed.
+    DisposableEffect(player, item.id) {
+        onDispose {
+            if (player.duration > 0L && player.currentPosition >= 0L) {
+                progressPrefs.edit()
+                    .putLong("position_${item.id}", player.currentPosition)
+                    .apply()
+            }
+
+            player.release()
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
-        title = { Text(item.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        },
+        title = {
+            Column {
+                Text(
+                    item.title,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                if (savedPosition > 0L) {
+                    Text(
+                        text = "Continue from ${formatTime(savedPosition)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        },
         text = {
             AndroidView(
-                factory = { PlayerView(it).apply { this.player = player } },
-                modifier = Modifier.fillMaxWidth().height(220.dp)
+                factory = { viewContext ->
+                    PlayerView(viewContext).apply {
+                        this.player = player
+                        useController = true
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(220.dp)
             )
         }
     )
+}
+
+private fun formatTime(milliseconds: Long): String {
+    val totalSeconds = milliseconds / 1000L
+    val hours = totalSeconds / 3600L
+    val minutes = (totalSeconds % 3600L) / 60L
+    val seconds = totalSeconds % 60L
+
+    return if (hours > 0L) {
+        "%d:%02d:%02d".format(hours, minutes, seconds)
+    } else {
+        "%d:%02d".format(minutes, seconds)
+    }
 }
